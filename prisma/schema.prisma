@@ -1,0 +1,88 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Plan {
+  BASE
+  SCOUT
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               Int           @id @default(autoincrement())
+  telegramId       BigInt        @unique
+  username         String?
+  firstName        String?
+  createdAt        DateTime      @default(now())
+
+  // Monetization
+  plan                  Plan      @default(BASE)
+  extraSlots            Int       @default(0)
+  subscriptionExpiresAt DateTime?
+  telegramSubscriptionId String?
+  priority              Int       @default(0)
+
+  // Referral
+  referredById              BigInt?
+  referralCount             Int     @default(0)
+  isReferralBonusClaimed    Boolean @default(false)
+
+  // Savings tracking
+  totalPotentialSavings     Float   @default(0)
+
+  // Activity tracking
+  lastActivityAt    DateTime  @default(now())
+
+  trackedItems TrackedItem[]
+
+  @@index([lastActivityAt])             // used by deleteInactiveUsers cron
+  @@index([plan])                       // used by subscription lookups
+  @@map("users")
+}
+
+model TrackedItem {
+  id            Int       @id @default(autoincrement())
+  url           String
+  title         String
+  currentPrice  Float?
+  previousPrice Float?
+  initialPrice  Float?
+  lowestPrice   Float?
+  targetPrice   Float?          // null = notify on any drop; set = Scout target
+  currency      String    @default("UAH")
+  inStock       Boolean   @default(true)
+  isActive             Boolean   @default(true)
+  isFrozen             Boolean   @default(false)
+  lastCheckedAt        DateTime  @default(now())
+  nextCheckAt          DateTime  @default(now())
+  checkIntervalMinutes Int       @default(720)
+  consecutiveErrors    Int       @default(0)
+  createdAt            DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  userId        Int
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  priceHistory  PriceHistory[]
+
+  @@index([userId])
+  @@index([isActive])
+  @@index([isActive, isFrozen])          // composite: used by getItemsDueForCheck hot path
+  @@map("tracked_items")
+}
+
+model PriceHistory {
+  id        Int      @id @default(autoincrement())
+  itemId    Int
+  price     Float
+  createdAt DateTime @default(now())
+
+  item TrackedItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([itemId, createdAt])
+  @@map("price_history")
+}
+

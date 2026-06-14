@@ -1,0 +1,13 @@
+node_modules
+dist
+npm-debug.log
+.env
+.env.development
+.env.production
+.git
+.github
+Dockerfile
+docker-compose.yml
+.DS_Store
+scripts
+README.md
