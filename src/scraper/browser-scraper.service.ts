@@ -5,13 +5,22 @@ import { ScrapeResult } from './scraper.types';
 import { genericAdapter } from './store-adapters';
 
 /**
- * Stores that require a real browser due to Cloudflare / anti-bot JS challenges.
- * Requests to these hostnames are automatically routed through BrowserScraperService.
+ * Base hostnames of stores that require a real browser due to Cloudflare / anti-bot.
+ * Matching is done via suffix (endsWith) so subdomains like www.foxtrot.com.ua also match.
  */
-export const BROWSER_REQUIRED_HOSTNAMES = new Set([
+export const BROWSER_REQUIRED_HOSTNAMES = [
   'foxtrot.com.ua',
   'comfy.ua',
-]);
+  'allo.ua',
+];
+
+/** Returns true if the given hostname should be scraped via Playwright. */
+export function requiresBrowser(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return BROWSER_REQUIRED_HOSTNAMES.some(
+    (base) => h === base || h.endsWith(`.${base}`),
+  );
+}
 
 /**
  * Proxy list — rotate per request to reduce per-IP ban risk.

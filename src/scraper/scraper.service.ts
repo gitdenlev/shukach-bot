@@ -3,7 +3,7 @@ import axios, { AxiosError } from 'axios';
 import * as cheerio from 'cheerio';
 import { ScrapeResult, StoreAdapter } from './scraper.types';
 import { genericAdapter } from './store-adapters';
-import { BrowserScraperService, BROWSER_REQUIRED_HOSTNAMES } from './browser-scraper.service';
+import { BrowserScraperService, requiresBrowser } from './browser-scraper.service';
 
 export const SUPPORTED_STORES = [
   { name: 'Comfy',    url: 'https://comfy.ua',        hostname: 'comfy.ua' },
@@ -87,7 +87,7 @@ export class ScraperService {
     const hostname = new URL(url).hostname.toLowerCase();
 
     // ── Route to Playwright for stores that block plain HTTP requests ────────
-    if (BROWSER_REQUIRED_HOSTNAMES.has(hostname)) {
+    if (requiresBrowser(hostname)) {
       this.logger.debug(`[Router] ${hostname} requires browser scraping — delegating to BrowserScraperService`);
       return this.browserScraper.scrape(url);
     }
