@@ -166,7 +166,7 @@ export class BrowserScraperService implements OnModuleDestroy {
       const originalQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
       (window.navigator.permissions as any).query = (parameters: PermissionDescriptor) =>
         parameters.name === 'notifications'
-          ? Promise.resolve({ state: 'default' } as PermissionStatus)
+          ? Promise.resolve({ state: 'default' } as unknown as PermissionStatus)
           : originalQuery(parameters);
     });
 
