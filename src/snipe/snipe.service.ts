@@ -73,18 +73,40 @@ export class SnipeService {
           const scraped = await this.scraperService.scrape(item.url);
           const telegramId = item.user.telegramId;
 
+          // ── Record price snapshot (builds history for future analysis) ──
+          if (scraped.price !== null) {
+            await this.itemsService.recordPriceSnapshot(item.id, scraped.price);
+          }
+
+          // ── Potential Savings check ─────────────────────────────────────
+          const currentLowest = (item as any).lowestPrice ?? item.currentPrice;
+          if (scraped.price !== null && currentLowest !== null && scraped.price < currentLowest) {
+            const priceDrop = currentLowest - scraped.price;
+            await this.usersService.incrementPotentialSavings(item.userId, item.id, priceDrop, scraped.price);
+            (item as any).lowestPrice = scraped.price;
+          }
+
+          // ── Atomic DB update: returns the price that was in DB BEFORE this write ──
+          // This is the only source of truth for "old price" — avoids any race
+          // condition between reading and writing currentPrice.
+          const { priceBeforeUpdate } = await this.itemsService.updateItemPrice(
+            item.id,
+            scraped.price,
+            scraped.inStock,
+          );
+
           // ── Price drop check ────────────────────────────────────────────
+          // Compare scraped price against what was stored BEFORE the update.
+          // Using item.currentPrice here would be unsafe: it reflects the value
+          // loaded at cycle-start and could be stale if two cycles overlap.
           if (
-            item.currentPrice !== null &&
+            priceBeforeUpdate !== null &&
             scraped.price !== null &&
-            scraped.price < item.currentPrice
+            scraped.price < priceBeforeUpdate
           ) {
-            const dropPct = ((item.currentPrice - scraped.price) / item.currentPrice) * 100;
+            const dropPct = ((priceBeforeUpdate - scraped.price) / priceBeforeUpdate) * 100;
             const targetPrice = (item as any).targetPrice as number | null;
 
-            // Decide whether to fire notification:
-            // • targetPrice set (Scout) → notify ONLY when price reaches/beats target
-            // • targetPrice null (BASE or Scout "any drop") → notify on any drop ≥ MIN_DROP_PERCENT
             const shouldNotify = targetPrice !== null
               ? scraped.price <= targetPrice
               : dropPct >= MIN_DROP_PERCENT;
@@ -101,7 +123,7 @@ export class SnipeService {
               if (isScout) {
                 const history = await this.itemsService.getPriceHistory(item.id, 30);
                 analysis = this.priceAnalysis.analyzePriceTrends(
-                  item.currentPrice,
+                  priceBeforeUpdate,
                   scraped.price,
                   history,
                 );
@@ -110,17 +132,16 @@ export class SnipeService {
                 );
               }
 
-              const message = formatPriceDropAlert(item, item.currentPrice, scraped.price, analysis);
+              const message = formatPriceDropAlert(item, priceBeforeUpdate, scraped.price, analysis);
 
               this.logger.log(
-                `💸 Price drop on item ${item.id}: ${item.currentPrice} → ${scraped.price}` +
+                `💸 Price drop on item ${item.id}: ${priceBeforeUpdate} → ${scraped.price}` +
                 ` (-${dropPct.toFixed(1)}%)` +
                 (targetPrice !== null ? ` [target=${targetPrice} reached ✅]` : '') +
                 (isScout ? ' [Scout ✅]' : ' [BASE]') +
                 (this.affiliate.hasAffiliate(item.url) ? ' [affiliate ✅]' : ' [affiliate ✗]'),
               );
 
-              // Send with inline keyboard
               await this.sendNotification(telegramId, message, keyboard);
               notified++;
             }
@@ -135,22 +156,6 @@ export class SnipeService {
             await this.sendNotification(telegramId, message, keyboard);
             notified++;
           }
-
-          // ── Record price snapshot (builds history for future analysis) ──
-          if (scraped.price !== null) {
-            await this.itemsService.recordPriceSnapshot(item.id, scraped.price);
-          }
-
-          // ── Potential Savings check ─────────────────────────────────────
-          const currentLowest = (item as any).lowestPrice ?? item.currentPrice;
-          if (scraped.price !== null && currentLowest !== null && scraped.price < currentLowest) {
-            const priceDrop = currentLowest - scraped.price;
-            await this.usersService.incrementPotentialSavings(item.userId, item.id, priceDrop, scraped.price);
-            (item as any).lowestPrice = scraped.price;
-          }
-
-          // ── Always update DB with latest data ──────────────────────────
-          await this.itemsService.updateItemPrice(item.id, scraped.price, scraped.inStock);
         } catch (err) {
           this.logger.warn(
             `Failed to check item ${item.id} (${item.url}): ${(err as Error).message}`,

@@ -68,6 +68,10 @@ model TrackedItem {
   user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   priceHistory  PriceHistory[]
 
+  // NOTE: A partial unique index "tracked_items_userId_url_active_uq" ON ("userId", "url")
+  // WHERE "isActive" = true is managed via raw SQL migration
+  // (prisma/migrations/20260621000000_unique_active_item_per_user/migration.sql).
+  // Prisma does not support partial unique indexes natively in schema.prisma.
   @@index([userId])
   @@index([isActive])
   @@index([isActive, isFrozen])          // composite: used by getItemsDueForCheck hot path

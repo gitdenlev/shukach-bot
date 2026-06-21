@@ -1,3 +1,5 @@
+import { ConflictException } from '@nestjs/common';
+import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { ItemsService } from './items.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
@@ -215,6 +217,96 @@ describe('ItemsService', () => {
         }),
       });
     });
+
+    it('should throw ConflictException when DB unique constraint is violated (race condition)', async () => {
+      // Simulates: two concurrent requests both passed findByUrl() check,
+      // but the second INSERT hits the partial unique index.
+      usersService.getUserLimits.mockResolvedValue({
+        totalSlots: 3,
+        checkInterval: 720,
+        canAddProduct: true,
+        plan: 'BASE',
+      });
+
+      const p2002Error = new PrismaClientKnownRequestError(
+        'Unique constraint failed on the fields: (`userId`,`url`)',
+        { code: 'P2002', clientVersion: '5.0.0' },
+      );
+      (prisma.trackedItem.create as jest.Mock).mockRejectedValue(p2002Error);
+
+      await expect(
+        service.addItem({
+          userId: 1,
+          url: 'https://rozetka.com.ua/product/race',
+          title: 'Race Product',
+          currentPrice: 5000,
+          inStock: true,
+        }),
+      ).rejects.toThrow(ConflictException);
+    });
+
+    it('should rethrow non-P2002 DB errors unchanged', async () => {
+      usersService.getUserLimits.mockResolvedValue({
+        totalSlots: 3,
+        checkInterval: 720,
+        canAddProduct: true,
+        plan: 'BASE',
+      });
+
+      const connectionError = new Error('DB connection lost');
+      (prisma.trackedItem.create as jest.Mock).mockRejectedValue(connectionError);
+
+      await expect(
+        service.addItem({
+          userId: 1,
+          url: 'https://rozetka.com.ua/product/new',
+          title: 'Test',
+          currentPrice: 1000,
+          inStock: true,
+        }),
+      ).rejects.toThrow('DB connection lost');
+    });
+
+    it('should handle concurrent adds: second call throws ConflictException (race condition simulation)', async () => {
+      // Simulates: request A and request B both call findByUrl() → null (no item yet).
+      // Request A wins the INSERT race; request B's INSERT hits the unique constraint.
+      usersService.getUserLimits.mockResolvedValue({
+        totalSlots: 3,
+        checkInterval: 720,
+        canAddProduct: true,
+        plan: 'BASE',
+      });
+
+      const createdItem = mockItem();
+      const p2002Error = new PrismaClientKnownRequestError(
+        'Unique constraint failed on the fields: (`userId`,`url`)',
+        { code: 'P2002', clientVersion: '5.0.0' },
+      );
+
+      // First call succeeds, second call hits the constraint.
+      (prisma.trackedItem.create as jest.Mock)
+        .mockResolvedValueOnce(createdItem)
+        .mockRejectedValueOnce(p2002Error);
+
+      const addPayload = {
+        userId: 1,
+        url: 'https://rozetka.com.ua/product/concurrent',
+        title: 'Concurrent Product',
+        currentPrice: 8000,
+        inStock: true,
+      };
+
+      const [resultA, resultB] = await Promise.allSettled([
+        service.addItem(addPayload),
+        service.addItem(addPayload),
+      ]);
+
+      expect(resultA.status).toBe('fulfilled');
+      expect((resultA as PromiseFulfilledResult<any>).value).toEqual(createdItem);
+
+      expect(resultB.status).toBe('rejected');
+      expect((resultB as PromiseRejectedResult).reason).toBeInstanceOf(ConflictException);
+    });
   });
 
   // ── getItemsForUser ──────────────────────────────────────────────────────
@@ -280,56 +372,45 @@ describe('ItemsService', () => {
   // ── updateItemPrice ──────────────────────────────────────────────────────
 
   describe('updateItemPrice', () => {
-    it('should update price and set previousPrice from current', async () => {
-      const current = mockItem({ currentPrice: 10000 });
-      (prisma.trackedItem.findUnique as jest.Mock).mockResolvedValue(current);
-      (prisma.trackedItem.update as jest.Mock).mockResolvedValue({
-        ...current,
-        previousPrice: 10000,
-        currentPrice: 9000,
-      });
+    it('should return priceBeforeUpdate from atomic SQL RETURNING', async () => {
+      // The raw SQL returns the previousPrice value — which is what currentPrice WAS before the update
+      (prisma.$queryRaw as jest.Mock).mockResolvedValue([{ previousPrice: 10000 }]);
 
-      await service.updateItemPrice(1, 9000, true);
+      const result = await service.updateItemPrice(1, 9000, true);
 
-      expect(prisma.trackedItem.update).toHaveBeenCalledWith({
-        where: { id: 1 },
-        data: {
-          previousPrice: 10000,
-          currentPrice: 9000,
-          inStock: true,
-          lastCheckedAt: expect.any(Date),
-        },
-      });
+      // Verify we issued a raw query (not findUnique + update)
+      expect(prisma.$queryRaw).toHaveBeenCalled();
+      expect(prisma.trackedItem.findUnique).not.toHaveBeenCalled();
+      expect(prisma.trackedItem.update).not.toHaveBeenCalled();
+
+      // Returns the old currentPrice from before the atomic write
+      expect(result).toEqual({ priceBeforeUpdate: 10000 });
     });
 
-    it('should handle null new price', async () => {
-      const current = mockItem({ currentPrice: 5000 });
-      (prisma.trackedItem.findUnique as jest.Mock).mockResolvedValue(current);
-      (prisma.trackedItem.update as jest.Mock).mockResolvedValue(current);
+    it('should return priceBeforeUpdate: null when previous price was null', async () => {
+      (prisma.$queryRaw as jest.Mock).mockResolvedValue([{ previousPrice: null }]);
 
-      await service.updateItemPrice(1, null, false);
+      const result = await service.updateItemPrice(1, 5000, true);
 
-      expect(prisma.trackedItem.update).toHaveBeenCalledWith({
-        where: { id: 1 },
-        data: expect.objectContaining({
-          currentPrice: null,
-          previousPrice: 5000,
-        }),
-      });
+      expect(result).toEqual({ priceBeforeUpdate: null });
     });
 
-    it('should set previousPrice to null when current item has no price', async () => {
-      (prisma.trackedItem.findUnique as jest.Mock).mockResolvedValue(null);
-      (prisma.trackedItem.update as jest.Mock).mockResolvedValue(mockItem());
+    it('should handle null new price (item went unavailable)', async () => {
+      (prisma.$queryRaw as jest.Mock).mockResolvedValue([{ previousPrice: 7000 }]);
 
-      await service.updateItemPrice(1, 5000, true);
+      const result = await service.updateItemPrice(1, null, false);
 
-      expect(prisma.trackedItem.update).toHaveBeenCalledWith({
-        where: { id: 1 },
-        data: expect.objectContaining({
-          previousPrice: null,
-        }),
-      });
+      expect(prisma.$queryRaw).toHaveBeenCalled();
+      expect(result).toEqual({ priceBeforeUpdate: 7000 });
+    });
+
+    it('should return priceBeforeUpdate: null when item not found', async () => {
+      // Empty RETURNING when no row matches WHERE id = ?
+      (prisma.$queryRaw as jest.Mock).mockResolvedValue([]);
+
+      const result = await service.updateItemPrice(999, 5000, true);
+
+      expect(result).toEqual({ priceBeforeUpdate: null });
     });
   });
 

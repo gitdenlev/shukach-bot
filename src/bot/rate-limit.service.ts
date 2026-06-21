@@ -8,8 +8,9 @@ interface RateLimitEntry {
 /**
  * Simple in-memory sliding-window rate limiter.
  *
- * Two tiers:
+ * Three tiers:
  *  • 'default' — generic messages / button taps  (20 req / 60 s)
+ *  • 'action'  — callback-query actions that hit the DB (10 req / 60 s)
  *  • 'scrape'  — URL-add requests that hit external stores (5 req / 60 s)
  *
  * The store is cleaned up lazily on every isAllowed() call for that user,
@@ -21,12 +22,13 @@ export class RateLimitService {
 
   private readonly WINDOW_MS = 60_000; // 1 minute
 
-  private readonly LIMITS: Record<'default' | 'scrape', number> = {
+  private readonly LIMITS: Record<'default' | 'action' | 'scrape', number> = {
     default: 20,
+    action: 10,
     scrape: 5,
   };
 
-  isAllowed(userId: number, type: 'default' | 'scrape' = 'default'): boolean {
+  isAllowed(userId: number, type: 'default' | 'action' | 'scrape' = 'default'): boolean {
     const key = `${type}:${userId}`;
     const now = Date.now();
     const limit = this.LIMITS[type];

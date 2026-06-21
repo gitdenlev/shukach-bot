@@ -1,4 +1,5 @@
-import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef, ConflictException } from '@nestjs/common';
+import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { PrismaService } from '../prisma/prisma.service';
 import { TrackedItem, User } from '@prisma/client';
 import { UsersService } from '../users/users.service';
@@ -78,19 +79,30 @@ export class ItemsService {
     inStock: boolean;
   }): Promise<TrackedItem> {
     const limits = await this.usersService.getUserLimits(data.userId);
-    return this.prisma.trackedItem.create({
-      data: {
-        userId: data.userId,
-        url: data.url,
-        title: data.title,
-        currentPrice: data.currentPrice,
-        initialPrice: data.currentPrice,
-        lowestPrice: data.currentPrice,
-        inStock: data.inStock,
-        isActive: true,
-        checkIntervalMinutes: limits.checkInterval,
-      } as any,
-    });
+    try {
+      return await this.prisma.trackedItem.create({
+        data: {
+          userId: data.userId,
+          url: data.url,
+          title: data.title,
+          currentPrice: data.currentPrice,
+          initialPrice: data.currentPrice,
+          lowestPrice: data.currentPrice,
+          inStock: data.inStock,
+          isActive: true,
+          checkIntervalMinutes: limits.checkInterval,
+        } as any,
+      });
+    } catch (err) {
+      // P2002 = unique constraint violation — the partial unique index
+      // "tracked_items_userId_url_active_uq" caught a race condition where two
+      // concurrent requests both passed the findByUrl() check and tried to insert
+      // the same (userId, url) pair simultaneously.
+      if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException('This URL is already being tracked');
+      }
+      throw err;
+    }
   }
 
   async getItemsForUser(userId: number): Promise<TrackedItem[]> {
@@ -138,22 +150,37 @@ export class ItemsService {
     }) as Promise<(TrackedItem & { user: { telegramId: bigint } })[]>;
   }
 
+  /**
+   * Atomically update price & stock using a single SQL statement.
+   * Returns the value of `currentPrice` that was stored BEFORE this update
+   * (i.e., the "old price") so the caller can compare without a separate SELECT.
+   *
+   * The previous two-query approach (findUnique + update) had a race window
+   * where a concurrent cycle could overwrite `currentPrice` between the two
+   * statements, making the comparison always equal and suppressing notifications.
+   */
   async updateItemPrice(
     itemId: number,
     newPrice: number | null,
     inStock: boolean,
-  ): Promise<TrackedItem> {
-    const current = await this.prisma.trackedItem.findUnique({ where: { id: itemId } });
+  ): Promise<{ priceBeforeUpdate: number | null }> {
+    // One atomic SQL round-trip:
+    //   1. copies currentPrice → previousPrice  (the OLD value is preserved)
+    //   2. writes newPrice       → currentPrice
+    //   3. RETURNING "previousPrice" gives us the value that WAS in currentPrice
+    //      before this statement ran — no race condition, no extra SELECT.
+    const rows = await this.prisma.$queryRaw<{ previousPrice: number | null }[]>`
+      UPDATE tracked_items
+      SET
+        "previousPrice" = "currentPrice",
+        "currentPrice"  = ${newPrice},
+        "inStock"       = ${inStock},
+        "lastCheckedAt" = NOW()
+      WHERE id = ${itemId}
+      RETURNING "previousPrice"
+    `;
 
-    return this.prisma.trackedItem.update({
-      where: { id: itemId },
-      data: {
-        previousPrice: current?.currentPrice ?? null,
-        currentPrice: newPrice,
-        inStock,
-        lastCheckedAt: new Date(),
-      },
-    });
+    return { priceBeforeUpdate: rows[0]?.previousPrice ?? null };
   }
 
   /**

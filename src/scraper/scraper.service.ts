@@ -2,19 +2,35 @@ import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosError } from 'axios';
 import * as cheerio from 'cheerio';
 import { ScrapeResult, StoreAdapter } from './scraper.types';
-import {
-  genericAdapter,
-} from './store-adapters';
+import { genericAdapter } from './store-adapters';
+import { BrowserScraperService, BROWSER_REQUIRED_HOSTNAMES } from './browser-scraper.service';
 
 export const SUPPORTED_STORES = [
-  { name: 'Comfy',    url: 'https://comfy.ua',         domain: /comfy\.ua/i },
-  { name: 'Brain',    url: 'https://brain.com.ua',     domain: /brain\.com\.ua/i },
-  { name: 'Allo',     url: 'https://allo.ua',          domain: /allo\.ua/i },
-  { name: 'Moyo',     url: 'https://moyo.ua',          domain: /moyo\.ua/i },
-  { name: 'Foxtrot',  url: 'https://foxtrot.com.ua',  domain: /foxtrot\.com\.ua/i },
-  { name: 'ITbox',    url: 'https://itbox.ua',         domain: /itbox\.ua/i },
-  { name: 'Citrus',   url: 'https://citrus.ua',        domain: /citrus\.ua/i },
+  { name: 'Comfy',    url: 'https://comfy.ua',        hostname: 'comfy.ua' },
+  { name: 'Brain',    url: 'https://brain.com.ua',    hostname: 'brain.com.ua' },
+  { name: 'Allo',     url: 'https://allo.ua',         hostname: 'allo.ua' },
+  { name: 'Moyo',     url: 'https://moyo.ua',         hostname: 'moyo.ua' },
+  { name: 'Foxtrot',  url: 'https://foxtrot.com.ua',  hostname: 'foxtrot.com.ua' },
+  { name: 'Citrus',   url: 'https://citrus.ua',       hostname: 'citrus.ua' },
 ];
+
+/**
+ * Regex for RFC-1918 private / loopback IPv4 ranges and IPv6 loopback.
+ * Blocks SSRF attempts targeting internal infrastructure.
+ */
+const PRIVATE_IP_RE = new RegExp(
+  '^(' +
+    '127\\.\\d+\\.\\d+\\.\\d+' +         // 127.0.0.0/8  loopback
+    '|10\\.\\d+\\.\\d+\\.\\d+' +          // 10.0.0.0/8   private
+    '|192\\.168\\.\\d+\\.\\d+' +          // 192.168.0.0/16 private
+    '|172\\.(1[6-9]|2\\d|3[01])\\.\\d+\\.\\d+' + // 172.16.0.0/12 private
+    '|169\\.254\\.\\d+\\.\\d+' +          // 169.254.0.0/16 link-local
+    '|0\\.0\\.0\\.0' +                    // unspecified
+    '|\\[::1\\]' +                        // IPv6 loopback (bracket form)
+    '|::1' +                             // IPv6 loopback (bare)
+  ')$',
+  'i',
+);
 
 const ADAPTERS: StoreAdapter[] = [
   genericAdapter,
@@ -62,10 +78,21 @@ function buildHeaders(url: string): Record<string, string> {
 export class ScraperService {
   private readonly logger = new Logger(ScraperService.name);
 
+  constructor(private readonly browserScraper: BrowserScraperService) {}
+
   async scrape(url: string): Promise<ScrapeResult> {
     this.validateUrl(url);
     this.validateSupportedStore(url);
 
+    const hostname = new URL(url).hostname.toLowerCase();
+
+    // ── Route to Playwright for stores that block plain HTTP requests ────────
+    if (BROWSER_REQUIRED_HOSTNAMES.has(hostname)) {
+      this.logger.debug(`[Router] ${hostname} requires browser scraping — delegating to BrowserScraperService`);
+      return this.browserScraper.scrape(url);
+    }
+
+    // ── Standard axios path for stores that serve static HTML ───────────────
     let html: string;
     try {
       html = await this.fetchHtml(url);
@@ -91,19 +118,51 @@ export class ScraperService {
     }
   }
 
+
+  /**
+   * Validates the URL for both security and supported-store constraints.
+   *
+   * Security rules enforced:
+   *  1. Must be a syntactically valid URL.
+   *  2. Protocol must be http: or https: — blocks javascript:, ftp:, etc.
+   *  3. No userinfo (username / password) — blocks `user@host` credential embedding.
+   *  4. Hostname must NOT be localhost or a private/loopback IP — blocks SSRF.
+   *  5. Hostname must match one of the allowed store domains exactly, or be a
+   *     direct subdomain (e.g. www.comfy.ua) — prevents path/query injection.
+   */
   private validateUrl(url: string): void {
+    let parsed: URL;
     try {
-      const parsed = new URL(url);
-      if (!['http:', 'https:'].includes(parsed.protocol)) {
-        throw new Error('Only http/https URLs are supported');
-      }
+      parsed = new URL(url);
     } catch {
       throw new Error(`Invalid URL: "${url}"`);
+    }
+
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      throw new Error(`Invalid URL: "${url}" — only http/https are allowed`);
+    }
+
+    if (parsed.username || parsed.password) {
+      throw new Error(`Invalid URL: "${url}" — userinfo (credentials) not allowed`);
+    }
+
+    const hostname = parsed.hostname.toLowerCase();
+
+    if (hostname === 'localhost' || PRIVATE_IP_RE.test(hostname)) {
+      throw new Error(`Invalid URL: "${url}" — private/local hosts are not allowed`);
     }
   }
 
   private validateSupportedStore(url: string): void {
-    const isSupported = SUPPORTED_STORES.some((s) => s.domain.test(url));
+    // URL is already validated by validateUrl(), so new URL() won't throw here.
+    const hostname = new URL(url).hostname.toLowerCase();
+
+    const isSupported = SUPPORTED_STORES.some((s) => {
+      const allowed = s.hostname.toLowerCase();
+      // Allow exact match OR subdomain: e.g. "www.comfy.ua" ends with ".comfy.ua"
+      return hostname === allowed || hostname.endsWith(`.${allowed}`);
+    });
+
     if (!isSupported) {
       throw new Error(
         'Цей магазин поки не підтримується. Перегляньте список доступних у розділі Допомога.',

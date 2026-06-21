@@ -70,6 +70,57 @@ describe('ScraperService', () => {
     });
   });
 
+  // ── URL security (anti-spoofing / SSRF) ────────────────────────────────────
+
+  describe('scrape() — URL security', () => {
+    it('should pass security checks for a valid supported-store URL', async () => {
+      // Verify that no security error (Invalid URL / не підтримується) is thrown.
+      // A parse error from the scraper itself is acceptable here.
+      const html = `<html><body><h1>Test Product</h1></body></html>`;
+      mockedAxios.get.mockResolvedValue({ data: html });
+      const promise = service.scrape('https://comfy.ua/product/iphone-15');
+      await expect(promise).rejects.not.toThrow(/Invalid URL/);
+    });
+
+    it('should reject userinfo URL (https://comfy.ua@evil.example/)', async () => {
+      // The actual hostname is evil.example; comfy.ua is the username part
+      await expect(
+        service.scrape('https://comfy.ua@evil.example/'),
+      ).rejects.toThrow(/Invalid URL/);
+    });
+
+    it('should reject store name in query param (https://evil.example/?next=comfy.ua)', async () => {
+      // Hostname is evil.example — not in the allow-list
+      await expect(
+        service.scrape('https://evil.example/?next=comfy.ua'),
+      ).rejects.toThrow(/не підтримується/);
+    });
+
+    it('should reject http://localhost/ (SSRF via localhost)', async () => {
+      await expect(
+        service.scrape('http://localhost/'),
+      ).rejects.toThrow(/Invalid URL/);
+    });
+
+    it('should reject http://127.0.0.1/ (SSRF via loopback IP)', async () => {
+      await expect(
+        service.scrape('http://127.0.0.1/product/123'),
+      ).rejects.toThrow(/Invalid URL/);
+    });
+
+    it('should reject http://192.168.1.1/ (SSRF via private IP)', async () => {
+      await expect(
+        service.scrape('http://192.168.1.1/product/123'),
+      ).rejects.toThrow(/Invalid URL/);
+    });
+
+    it('should reject http://10.0.0.1/ (SSRF via private IP)', async () => {
+      await expect(
+        service.scrape('http://10.0.0.1/product/123'),
+      ).rejects.toThrow(/Invalid URL/);
+    });
+  });
+
   // ── Network errors ─────────────────────────────────────────────────────────
 
   describe('scrape() — network errors', () => {

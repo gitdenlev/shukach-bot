@@ -9,6 +9,7 @@ import { ItemsService } from "../items/items.service";
 import { ScraperService } from "../scraper/scraper.service";
 import { TestUiService } from "./test-ui.service";
 import { SUPPORTED_STORES } from "../scraper/scraper.service";
+import { normalizeUrl } from "../scraper/url-normalizer";
 import {
   formatItemAdded,
   formatItemCard,
@@ -52,6 +53,29 @@ export class BotUpdate {
     private readonly rateLimitService: RateLimitService,
   ) {}
 
+  /**
+   * Check rate limit for a user and, if exceeded, respond appropriately:
+   *  - callback queries  → ctx.answerCbQuery() with a toast (no chat spam)
+   *  - text/command ctx  → ctx.reply() with a message
+   *
+   * @returns true if the request is allowed, false if it was blocked (caller should return early)
+   */
+  private async ensureRateLimited(
+    ctx: Context,
+    userId: number,
+    type: 'default' | 'action' | 'scrape' = 'default',
+  ): Promise<boolean> {
+    if (this.rateLimitService.isAllowed(userId, type)) return true;
+
+    const isCallback = 'callbackQuery' in ctx && ctx.callbackQuery != null;
+    if (isCallback) {
+      await ctx.answerCbQuery('⏳ Занадто багато запитів. Зачекайте хвилину.', { show_alert: true });
+    } else {
+      await ctx.reply('⏳ Занадто багато повідомлень. Зачекайте хвилину і спробуйте знову.');
+    }
+    return false;
+  }
+
   @Command("test_ui")
   async onTestUi(@Ctx() ctx: Context): Promise<void> {
     const tgUser = ctx.from;
@@ -76,6 +100,12 @@ export class BotUpdate {
   @Command('delete_my_data')
   @Action('delete_my_data')
   async onDeleteMyData(@Ctx() ctx: Context): Promise<void> {
+    const tgUser = ctx.from;
+    if (!tgUser) return;
+
+    // Rate-limit: uses 'action' tier since this triggers a confirmation UI
+    if (!await this.ensureRateLimited(ctx, tgUser.id, 'action')) return;
+
     // Called both as a slash command and as an inline callback from the Profile
     if ('callbackQuery' in ctx) await ctx.answerCbQuery();
 
@@ -97,9 +127,13 @@ export class BotUpdate {
 
   @Action('confirm_delete_my_data')
   async onConfirmDeleteMyData(@Ctx() ctx: Context): Promise<void> {
-    await ctx.answerCbQuery();
     const tgUser = ctx.from;
     if (!tgUser) return;
+
+    // Rate-limit: 'action' tier — this performs a destructive DB operation
+    if (!await this.ensureRateLimited(ctx, tgUser.id, 'action')) return;
+
+    await ctx.answerCbQuery();
 
     try {
       const deleted = await this.usersService.deleteByTelegramId(BigInt(tgUser.id));
@@ -118,6 +152,12 @@ export class BotUpdate {
 
   @Action('cancel_delete_my_data')
   async onCancelDeleteMyData(@Ctx() ctx: Context): Promise<void> {
+    const tgUser = ctx.from;
+    if (!tgUser) return;
+
+    // Rate-limit: 'default' tier — lightweight, no DB writes
+    if (!await this.ensureRateLimited(ctx, tgUser.id, 'default')) return;
+
     await ctx.answerCbQuery();
   }
 
@@ -362,6 +402,9 @@ export class BotUpdate {
     const tgUser = callbackQuery?.from;
     if (!tgUser) return;
 
+    // Rate-limit: 'action' tier — DB write (soft-delete)
+    if (!await this.ensureRateLimited(ctx, tgUser.id, 'action')) return;
+
     const match = callbackQuery.data?.match(/^delete_item:(\d+)$/);
     if (!match) return;
 
@@ -393,6 +436,12 @@ export class BotUpdate {
   // ─────────────────────────────────────────────────────────────────────────
   @Action("list_products")
   async onListProducts(@Ctx() ctx: Context): Promise<void> {
+    const tgUser = ctx.from;
+    if (!tgUser) return;
+
+    // Rate-limit: 'action' tier — fetches all user items from DB
+    if (!await this.ensureRateLimited(ctx, tgUser.id, 'action')) return;
+
     await ctx.answerCbQuery();
     return this.onList(ctx);
   }
@@ -412,9 +461,13 @@ export class BotUpdate {
   // ─────────────────────────────────────────────────────────────────────────
   @Action(/^target_pct:\d+:\d+$/)
   async onTargetPct(@Ctx() ctx: Context): Promise<void> {
-    await ctx.answerCbQuery();
     const tgUser = ctx.from;
     if (!tgUser) return;
+
+    // Rate-limit: 'action' tier — DB write (sets target price)
+    if (!await this.ensureRateLimited(ctx, tgUser.id, 'action')) return;
+
+    await ctx.answerCbQuery();
 
     const data = (ctx.callbackQuery as any)?.data as string;
     const [, itemIdStr, pctStr] = data.split(':');
@@ -453,9 +506,13 @@ export class BotUpdate {
   // ─────────────────────────────────────────────────────────────────────────
   @Action(/^target_custom:\d+$/)
   async onTargetCustom(@Ctx() ctx: Context): Promise<void> {
-    await ctx.answerCbQuery();
     const tgUser = ctx.from;
     if (!tgUser) return;
+
+    // Rate-limit: 'action' tier — DB read + sets wizard state
+    if (!await this.ensureRateLimited(ctx, tgUser.id, 'action')) return;
+
+    await ctx.answerCbQuery();
 
     const data = (ctx.callbackQuery as any)?.data as string;
     const itemId = parseInt(data.split(':')[1], 10);
@@ -495,9 +552,13 @@ export class BotUpdate {
   // ─────────────────────────────────────────────────────────────────────────
   @Action(/^target_skip:\d+$/)
   async onTargetSkip(@Ctx() ctx: Context): Promise<void> {
-    await ctx.answerCbQuery();
     const tgUser = ctx.from;
     if (!tgUser) return;
+
+    // Rate-limit: 'action' tier — DB read
+    if (!await this.ensureRateLimited(ctx, tgUser.id, 'action')) return;
+
+    await ctx.answerCbQuery();
 
     const data = (ctx.callbackQuery as any)?.data as string;
     const itemId = parseInt(data.split(':')[1], 10);
@@ -576,10 +637,7 @@ export class BotUpdate {
     if (!tgUser) return;
 
     // Rate limit: 20 messages / minute per user
-    if (!this.rateLimitService.isAllowed(tgUser.id, 'default')) {
-      await ctx.reply('⏳ Занадто багато повідомлень. Зачекайте хвилину і спробуйте знову.');
-      return;
-    }
+    if (!await this.ensureRateLimited(ctx, tgUser.id, 'default')) return;
 
     // Update activity timestamp on every user interaction
     void this.usersService.touchActivity(BigInt(tgUser.id));
@@ -742,6 +800,10 @@ export class BotUpdate {
       return;
     }
 
+    // Normalise before any storage or duplicate checks so that the same product
+    // page reached via different affiliate/tracking links is treated as one entry.
+    const normalizedUrl = normalizeUrl(url);
+
     // Rate limit: max 5 scrape requests / minute (heavy external HTTP calls)
     if (!this.rateLimitService.isAllowed(tgUser.id, 'scrape')) {
       await ctx.reply('⏳ Забагато запитів на додавання товарів. Зачекайте хвилину і спробуйте знову.');
@@ -754,8 +816,9 @@ export class BotUpdate {
       firstName: tgUser.first_name,
     });
 
-    // Duplicate check
-    const existing = await this.itemsService.findByUrl(user.id, url);
+    // Duplicate check — use the normalised URL so tracking-param variants
+    // of the same product page don't slip through as separate items.
+    const existing = await this.itemsService.findByUrl(user.id, normalizedUrl);
     if (existing) {
       await ctx.replyWithHTML(
         `ℹ️ <b>Цей товар вже у вашому списку!</b>\n\n` +
@@ -778,10 +841,12 @@ export class BotUpdate {
     const loadingMsg = await ctx.reply("🔍 Зчитую сторінку, зачекайте...");
 
     try {
-      const scraped = await this.scraperService.scrape(url);
+      // Scrape using the normalised URL (tracking params stripped) so the HTTP
+      // request hits the canonical product page.
+      const scraped = await this.scraperService.scrape(normalizedUrl);
       const item = await this.itemsService.addItem({
         userId: user.id,
-        url,
+        url: normalizedUrl,
         title: scraped.title,
         currentPrice: scraped.price,
         inStock: scraped.inStock,

@@ -11,7 +11,11 @@ import { Telegraf } from 'telegraf';
 function createMockItemsService() {
   return {
     getItemsDueForCheck: jest.fn(),
-    updateItemPrice: jest.fn(),
+    // updateItemPrice now returns { priceBeforeUpdate } — the price that WAS
+    // in DB before the atomic UPDATE ran. Tests set this via mockResolvedValue.
+    updateItemPrice: jest.fn().mockImplementation((_id, _price, _inStock) =>
+      Promise.resolve({ priceBeforeUpdate: null }),
+    ),
     getItemCountForUser: jest.fn(),
     getPriceHistory: jest.fn().mockResolvedValue([]),
     recordPriceSnapshot: jest.fn().mockResolvedValue(undefined),
@@ -144,6 +148,8 @@ describe('SnipeService', () => {
         currency: 'UAH',
         inStock: true,
       });
+      // updateItemPrice returns the price that WAS in DB (old price) before the write
+      itemsService.updateItemPrice.mockResolvedValue({ priceBeforeUpdate: 10000 });
       priceAnalysis.getPriceVerdict.mockReturnValue({
         verdict: 'real_discount',
         pctDrop: 6,
@@ -169,6 +175,7 @@ describe('SnipeService', () => {
         currency: 'UAH',
         inStock: true,
       });
+      itemsService.updateItemPrice.mockResolvedValue({ priceBeforeUpdate: 10000 });
 
       await service.runSniper();
 
@@ -202,6 +209,8 @@ describe('SnipeService', () => {
         currency: 'UAH',
         inStock: true,
       });
+      // DB had null stored — first scrape scenario
+      itemsService.updateItemPrice.mockResolvedValue({ priceBeforeUpdate: null });
 
       await service.runSniper();
 
@@ -277,6 +286,7 @@ describe('SnipeService', () => {
         currency: 'UAH',
         inStock: true,
       });
+      itemsService.updateItemPrice.mockResolvedValue({ priceBeforeUpdate: 10000 });
       priceAnalysis.getPriceVerdict.mockReturnValue({
         verdict: 'real_discount',
         pctDrop: 10,

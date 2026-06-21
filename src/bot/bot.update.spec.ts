@@ -19,6 +19,7 @@ function createMockUsersService() {
     addPurchasedSlots: jest.fn(),
     activateScout: jest.fn(),
     touchActivity: jest.fn().mockResolvedValue(undefined),
+    deleteByTelegramId: jest.fn(),
   } as unknown as jest.Mocked<UsersService>;
 }
 
@@ -628,6 +629,140 @@ describe('BotUpdate', () => {
 
       expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('недоступна'));
       expect(testUiService.runSequence).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Action callback rate limiting ──────────────────────────────────
+
+  describe('rate limiting for @Action handlers', () => {
+    beforeEach(() => {
+      // Make rate limiter block all requests
+      rateLimitService.isAllowed.mockReturnValue(false);
+    });
+
+    it('onDeleteCallback: should respond via answerCbQuery, NOT ctx.reply', async () => {
+      const ctx = createMockCtx({
+        callbackQuery: {
+          data: 'delete_item:42',
+          from: { id: 123456789 },
+        },
+      });
+
+      await botUpdate.onDeleteCallback(ctx);
+
+      // Must answer the callback query (Telegram requires it)
+      expect(ctx.answerCbQuery).toHaveBeenCalledWith(
+        expect.stringContaining('⏳'),
+        expect.objectContaining({ show_alert: true }),
+      );
+      // Must NOT send a chat message
+      expect(ctx.reply).not.toHaveBeenCalled();
+      // Must NOT touch the DB
+      expect(itemsService.deleteItem).not.toHaveBeenCalled();
+    });
+
+    it('onListProducts: should respond via answerCbQuery, NOT ctx.reply', async () => {
+      const ctx = createMockCtx({
+        callbackQuery: { data: 'list_products', from: { id: 123456789 } },
+      });
+
+      await botUpdate.onListProducts(ctx);
+
+      expect(ctx.answerCbQuery).toHaveBeenCalledWith(
+        expect.stringContaining('⏳'),
+        expect.objectContaining({ show_alert: true }),
+      );
+      expect(ctx.reply).not.toHaveBeenCalled();
+      expect(itemsService.getItemsForUser).not.toHaveBeenCalled();
+    });
+
+    it('onTargetPct: should respond via answerCbQuery, NOT ctx.reply', async () => {
+      const ctx = createMockCtx({
+        callbackQuery: { data: 'target_pct:1:10', from: { id: 123456789 } },
+      });
+
+      await botUpdate.onTargetPct(ctx);
+
+      expect(ctx.answerCbQuery).toHaveBeenCalledWith(
+        expect.stringContaining('⏳'),
+        expect.objectContaining({ show_alert: true }),
+      );
+      expect(ctx.reply).not.toHaveBeenCalled();
+      expect(usersService.findByTelegramId).not.toHaveBeenCalled();
+    });
+
+    it('onTargetCustom: should respond via answerCbQuery, NOT ctx.reply', async () => {
+      const ctx = createMockCtx({
+        callbackQuery: { data: 'target_custom:1', from: { id: 123456789 } },
+      });
+
+      await botUpdate.onTargetCustom(ctx);
+
+      expect(ctx.answerCbQuery).toHaveBeenCalledWith(
+        expect.stringContaining('⏳'),
+        expect.objectContaining({ show_alert: true }),
+      );
+      expect(ctx.reply).not.toHaveBeenCalled();
+      expect(usersService.findByTelegramId).not.toHaveBeenCalled();
+    });
+
+    it('onTargetSkip: should respond via answerCbQuery, NOT ctx.reply', async () => {
+      const ctx = createMockCtx({
+        callbackQuery: { data: 'target_skip:1', from: { id: 123456789 } },
+      });
+
+      await botUpdate.onTargetSkip(ctx);
+
+      expect(ctx.answerCbQuery).toHaveBeenCalledWith(
+        expect.stringContaining('⏳'),
+        expect.objectContaining({ show_alert: true }),
+      );
+      expect(ctx.reply).not.toHaveBeenCalled();
+      expect(usersService.findByTelegramId).not.toHaveBeenCalled();
+    });
+
+    it('onConfirmDeleteMyData: should respond via answerCbQuery when rate-limited', async () => {
+      const ctx = createMockCtx({
+        callbackQuery: { data: 'confirm_delete_my_data', from: { id: 123456789 } },
+      });
+
+      await botUpdate.onConfirmDeleteMyData(ctx);
+
+      expect(ctx.answerCbQuery).toHaveBeenCalledWith(
+        expect.stringContaining('⏳'),
+        expect.objectContaining({ show_alert: true }),
+      );
+      expect(ctx.reply).not.toHaveBeenCalled();
+      expect(usersService.deleteByTelegramId).not.toHaveBeenCalled();
+    });
+
+    it('onDeleteMyData (action): should respond via answerCbQuery when rate-limited', async () => {
+      const ctx = createMockCtx({
+        callbackQuery: { data: 'delete_my_data', from: { id: 123456789 } },
+      });
+
+      await botUpdate.onDeleteMyData(ctx);
+
+      expect(ctx.answerCbQuery).toHaveBeenCalledWith(
+        expect.stringContaining('⏳'),
+        expect.objectContaining({ show_alert: true }),
+      );
+      expect(ctx.reply).not.toHaveBeenCalled();
+      expect(ctx.replyWithHTML).not.toHaveBeenCalled();
+    });
+
+    it('onCancelDeleteMyData: should respond via answerCbQuery when rate-limited', async () => {
+      const ctx = createMockCtx({
+        callbackQuery: { data: 'cancel_delete_my_data', from: { id: 123456789 } },
+      });
+
+      await botUpdate.onCancelDeleteMyData(ctx);
+
+      expect(ctx.answerCbQuery).toHaveBeenCalledWith(
+        expect.stringContaining('⏳'),
+        expect.objectContaining({ show_alert: true }),
+      );
+      expect(ctx.reply).not.toHaveBeenCalled();
     });
   });
 });
